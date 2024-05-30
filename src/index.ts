@@ -12,6 +12,10 @@ import fs from 'fs';
 import {
   DescribeStackResourcesInput,
   DescribeStackResourcesOutput,
+  DescribeStacksInput,
+  DescribeStacksOutput,
+  ListStackResourcesInput,
+  ListStackResourcesOutput,
 } from 'aws-sdk/clients/cloudformation';
 import {
   AssociateApiRequest,
@@ -349,6 +353,66 @@ class ServerlessAppsyncPlugin {
     });
   }
 
+  async getStackContainingGraphQlApi(stackName: string): Promise<string> {
+    let stackContainingGraphQlApi = stackName;
+
+    const describeStacks = async (stackName: string) => {
+      try {
+        const response = await this.provider.request<
+          DescribeStacksInput,
+          DescribeStacksOutput
+        >('CloudFormation', 'describeStacks', { StackName: stackName });
+
+        if (response.Stacks) {
+          for (const stack of response.Stacks) {
+            const found = await listNestedStackResources(stack.StackName);
+            if (found) {
+              stackContainingGraphQlApi = stack.StackName;
+              break;
+            }
+          }
+        }
+      } catch (error) {
+        this.serverless.cli.log(
+          `Error describing stack ${stackName}: ${(error as Error).message}`,
+        );
+      }
+      return false;
+    };
+
+    const listNestedStackResources = async (stackName: string) => {
+      try {
+        const response = await this.provider.request<
+          ListStackResourcesInput,
+          ListStackResourcesOutput
+        >('CloudFormation', 'listStackResources', { StackName: stackName });
+
+        if (response.StackResourceSummaries) {
+          for (const resource of response.StackResourceSummaries) {
+            if (resource.ResourceType === 'AWS::AppSync::GraphQLApi') {
+              return true;
+            }
+            if (resource.ResourceType === 'AWS::CloudFormation::Stack') {
+              if (resource.PhysicalResourceId)
+                await describeStacks(resource.PhysicalResourceId);
+            }
+          }
+        }
+      } catch (error) {
+        this.serverless.cli.log(
+          `Error listing resources for stack ${stackName}: ${
+            (error as Error).message
+          }`,
+        );
+      }
+      return false;
+    };
+
+    await describeStacks(stackName);
+
+    return stackContainingGraphQlApi;
+  }
+
   async getApiId() {
     this.loadConfig();
 
@@ -359,12 +423,15 @@ class ServerlessAppsyncPlugin {
     }
 
     const logicalIdGraphQLApi = this.naming.getApiLogicalId();
+    const stackName = await this.getStackContainingGraphQlApi(
+      this.provider.naming.getStackName(),
+    );
 
     const { StackResources } = await this.provider.request<
       DescribeStackResourcesInput,
       DescribeStackResourcesOutput
     >('CloudFormation', 'describeStackResources', {
-      StackName: this.provider.naming.getStackName(),
+      StackName: stackName,
       LogicalResourceId: logicalIdGraphQLApi,
     });
 
